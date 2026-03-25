@@ -3,7 +3,6 @@ import logging
 import os
 import json
 import asyncio
-import random
 import time
 
 from telegram import (
@@ -26,7 +25,7 @@ from telegram.error import RetryAfter, BadRequest, Forbidden
 BOT_TOKEN = os.getenv("BOT_TOKEN") or '8689327624:AAGMNVlhz3qu4wOS4Agbij_BhaVX6jj6Aho'
 DATA_FILE = "registered_chats.json"
 
-ALLOWED_USERNAMES = {"SpammBotsss", "patrickost", "Beckenbauer089"}  # без @
+ALLOWED_USERNAMES = {"SpammBotsss", "ALLGUTH1"}
 # ===============================================
 
 logging.basicConfig(
@@ -53,6 +52,8 @@ spam_task: asyncio.Task | None = None
 flood_until = {}
 msg_index = 0
 
+semaphore = asyncio.Semaphore(20)
+
 FATAL_ERRORS = (
     "Chat not found",
     "Chat_restricted",
@@ -60,7 +61,7 @@ FATAL_ERRORS = (
     "Forbidden",
 )
 
-# ================== ERROR HANDLER ==================
+# ================== ERROR ==================
 async def error_handler(update, context):
     logging.error("Unhandled exception", exc_info=context.error)
 
@@ -106,7 +107,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         messages_cycle.clear()
-        context.user_data["await_msgs"] = 5  # теперь 5 сообщений
+        context.user_data["await_msgs"] = 5
         await query.message.reply_text("Schiken Sie mir 5 Nachrichten.")
 
     elif query.data == "stop_spam":
@@ -117,7 +118,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text("Spam ist nicht an.")
 
-# ================== RECEIVE MSG ==================
+# ================== RECEIVE ==================
 async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global spam_task
 
@@ -140,7 +141,7 @@ async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Осталось сообщений: {context.user_data['await_msgs']}"
             )
 
-# ================== SEND MESSAGE ==================
+# ================== SEND ==================
 async def send_any(bot, chat_id, msg):
     if msg.text:
         await bot.send_message(chat_id, msg.text)
@@ -159,6 +160,22 @@ async def send_any(bot, chat_id, msg):
             caption=msg.caption
         )
 
+async def send_safe(context, chat_id, chat_title, msg):
+    try:
+        async with semaphore:
+            await send_any(context.bot, chat_id, msg)
+
+    except RetryAfter as e:
+        flood_until[chat_id] = time.time() + e.retry_after
+
+    except (BadRequest, Forbidden) as e:
+        err = str(e)
+        if any(x in err for x in FATAL_ERRORS):
+            registered_chats[:] = [
+                c for c in registered_chats if c[0] != chat_id
+            ]
+            save_chats()
+
 # ================== SPAM LOOP ==================
 async def spam_loop(context: ContextTypes.DEFAULT_TYPE):
     global msg_index, spam_task
@@ -166,47 +183,28 @@ async def spam_loop(context: ContextTypes.DEFAULT_TYPE):
     logging.info("Spam loop started")
 
     try:
-        start_cycle_time = time.time()
-
         while True:
             if not messages_cycle:
-                logging.warning("messages_cycle пуст, жду...")
-                await asyncio.sleep(5)
+                await asyncio.sleep(1)
                 continue
 
-            for chat_id, chat_title in list(registered_chats):
-                now = time.time()
+            tasks = []
 
-                if chat_id in flood_until and flood_until[chat_id] > now:
+            for chat_id, chat_title in list(registered_chats):
+                if chat_id in flood_until and flood_until[chat_id] > time.time():
                     continue
 
                 msg = messages_cycle[msg_index % len(messages_cycle)]
                 msg_index += 1
 
-                try:
-                    await send_any(context.bot, chat_id, msg)
-                    logging.info(f"Отправлено в {chat_title}")
+                tasks.append(
+                    send_safe(context, chat_id, chat_title, msg)
+                )
 
-                except RetryAfter as e:
-                    flood_until[chat_id] = time.time() + e.retry_after
-                    logging.warning(f"FloodWait {chat_title}: {e.retry_after}s")
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
-                except (BadRequest, Forbidden) as e:
-                    err = str(e)
-                    logging.error(f"{chat_title}: {err}")
-
-                    if any(x in err for x in FATAL_ERRORS):
-                        registered_chats[:] = [
-                            c for c in registered_chats if c[0] != chat_id
-                        ]
-                        save_chats()
-
-                await asyncio.sleep(random.uniform(4, 7))
-
-            if time.time() - start_cycle_time >= 600:
-                logging.info("Глобальная пауза 60s")
-                await asyncio.sleep(60)
-                start_cycle_time = time.time()
+            await asyncio.sleep(1)
 
     except asyncio.CancelledError:
         logging.warning("Spam loop cancelled")
@@ -268,10 +266,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
